@@ -89,25 +89,56 @@ as `external_id` so notifications stay idempotent across runs.
 
 Keep keyword filtering out of scrapers — `filters.py` runs after the merge.
 
-## Filter rules
+## Profiles (multi-channel)
 
-Tunable in `firms.yaml` under `filters:`:
+`firms.yaml` defines named **profiles** under `profiles:`. Each profile has
+its own filter rules, Discord webhook (looked up by env-var name), and state
+file. One fetch run, N filter passes — a posting matching multiple profiles
+gets sent to all matching channels.
 
-- `must_include_any`: title must contain `intern` / `internship` (word boundary).
-- `must_include_role_any`: title must contain a quant/trading/research keyword.
-- `must_exclude_any`: substring blacklist (`software engineer intern`, `marketing`, …).
-- `pass_year` / `reject_years`: titles with `2027` always pass; titles with
-  `2024/25/26` and not `2027` reject; titles with no year at all pass
-  (favoring recall over precision — a false positive is one extra Discord
-  ping; a false negative is a missed application).
+Default profiles:
 
-## State file
+| Profile | Webhook env var             | State file                    | Scope                                                       |
+|---------|-----------------------------|-------------------------------|-------------------------------------------------------------|
+| `quant` | `DISCORD_WEBHOOK_URL`       | `state/postings_quant.json`   | quant / trader / researcher / systematic / algo (intern only) |
+| `tech`  | `DISCORD_WEBHOOK_URL_TECH`  | `state/postings_tech.json`    | SWE / data science / ML / AI / finance / S&T / banking — intern *or* "Summer Analyst" |
 
-`state/postings.json` is keyed `"{firm}::{external_id}"` and committed back
-each run by `stefanzweifel/git-auto-commit-action`. Disappeared postings
-are kept with their `last_seen` timestamp updated — never deleted. Set
-`notify_on_close: true` on a firm in `firms.yaml` (future enhancement) to
-have closures send a "role gone" embed.
+Per-profile filter knobs (under `profiles.<name>.filters:`):
+
+- `must_include_any`: at least one must appear (word boundary). For `quant` this
+  is `intern` / `internship`; for `tech` it also includes `summer analyst` and
+  `summer associate` since banks brand intern roles that way.
+- `must_include_role_any`: at least one role keyword must appear.
+- `must_exclude_any`: substring blacklist (HR/marketing/legal/etc.).
+- `pass_year` / `reject_years`: titles with `2027` always pass; `2024/25/26`
+  without `2027` reject; no year at all → pass (recall over precision).
+
+To run only one profile locally: `python monitor.py --profile tech --dry-run`.
+
+## Adding a profile
+
+```yaml
+profiles:
+  ml-research:                       # arbitrary name
+    webhook_env: DISCORD_WEBHOOK_URL_ML
+    state_file: state/postings_ml.json
+    filters:
+      must_include_any: [intern, internship]
+      must_include_role_any: [machine learning, ml, ai, deep learning, research]
+      must_exclude_any: [marketing, hr intern]
+      pass_year: "2027"
+      reject_years: ["2024", "2025", "2026"]
+```
+
+Then add the matching repo secret (`DISCORD_WEBHOOK_URL_ML`) and add it to
+the `env:` block of the `Run monitor` step in
+`.github/workflows/monitor.yml`. First run auto-seeds (single summary msg).
+
+## State files
+
+One JSON file per profile under `state/`, each keyed `"{firm}::{external_id}"`,
+committed back each run by `stefanzweifel/git-auto-commit-action`. Disappeared
+postings are kept with their `last_seen` timestamp updated — never deleted.
 
 ## Interpreting `unsupported.log`
 

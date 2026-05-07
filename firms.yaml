@@ -1,42 +1,111 @@
-# Filter rules and master firm list for the Summer 2027 quant intern monitor.
-# Tune these without code changes — filters.py reads this file.
+# Filter profiles + master firm list for the Summer 2027 intern monitor.
+# Each profile has its own filter rules, Discord webhook (env-var lookup),
+# and state file. One fetch run, N filter passes — postings that match
+# multiple profiles get sent to multiple channels.
 
-filters:
-  # Title (case-insensitive, word-boundary aware) must include at least one of:
-  must_include_any:
-    - intern
-    - internship
-  # AND must include at least one of:
-  must_include_role_any:
-    - quant
-    - quantitative
-    - trader
-    - trading
-    - researcher
-    - research
-    - systematic
-    - algorithmic
-    - algo
-  # AND must NOT contain any of these (substring match, case-insensitive):
-  must_exclude_any:
-    - software engineer intern
-    - swe intern
-    - hr intern
-    - marketing
-    - recruiting
-    - operations intern
-    - compliance intern
-    - legal intern
-    - audit intern
-    - graphic
-    - design intern
-    - data engineer intern
-  # Year handling
-  pass_year: "2027"
-  reject_years:
-    - "2024"
-    - "2025"
-    - "2026"
+profiles:
+  quant:
+    webhook_env: DISCORD_WEBHOOK_URL
+    state_file: state/postings_quant.json
+    filters:
+      must_include_any:
+        - intern
+        - internship
+      must_include_role_any:
+        - quant
+        - quantitative
+        - trader
+        - trading
+        - researcher
+        - research
+        - systematic
+        - algorithmic
+        - algo
+      must_exclude_any:
+        - software engineer intern
+        - swe intern
+        - hr intern
+        - marketing
+        - recruiting
+        - operations intern
+        - compliance intern
+        - legal intern
+        - audit intern
+        - graphic
+        - design intern
+        - data engineer intern
+      pass_year: "2027"
+      reject_years: ["2024", "2025", "2026"]
+
+  tech:
+    webhook_env: DISCORD_WEBHOOK_URL_TECH
+    state_file: state/postings_tech.json
+    filters:
+      # "Summer Analyst" / "Summer Associate" are how banks brand their intern
+      # roles — without these, finance/S&T postings would all be rejected.
+      must_include_any:
+        - intern
+        - internship
+        - summer analyst
+        - summer associate
+      must_include_role_any:
+        - software
+        - swe
+        - engineer
+        - engineering
+        - developer
+        - programmer
+        - data science
+        - data scientist
+        - data analyst
+        - data analytics
+        - machine learning
+        - ml
+        - ai
+        - artificial intelligence
+        - computer science
+        - infrastructure
+        - platform
+        - devops
+        - sre
+        - security
+        - frontend
+        - backend
+        - fullstack
+        - full-stack
+        - full stack
+        - mobile
+        - ios
+        - android
+        - web
+        - cloud
+        # Finance / S&T scope
+        - finance
+        - banking
+        - investment banking
+        - sales and trading
+        - sales & trading
+        - s&t
+        - markets
+        - capital markets
+        - asset management
+        - hedge fund
+        - private equity
+        - investment
+        - analyst
+      must_exclude_any:
+        - hr intern
+        - marketing
+        - recruiting
+        - operations intern
+        - compliance intern
+        - legal intern
+        - audit intern
+        - graphic
+        - design intern
+        - accounting intern
+      pass_year: "2027"
+      reject_years: ["2024", "2025", "2026"]
 
 sources:
   simplify:

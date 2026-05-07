@@ -41,25 +41,19 @@ jobs:
         env:
           PYTHONPATH: .
 
-      - name: Decide seed flag
-        id: seed
-        run: |
-          if [ ! -s state/postings.json ]; then
-            echo "flag=--seed" >> $GITHUB_OUTPUT
-          else
-            echo "flag=" >> $GITHUB_OUTPUT
-          fi
-
+      # No --seed flag needed: monitor.py auto-detects empty state per profile
+      # and uses the cold-start guardrail (single summary message instead of N pings).
       - name: Run monitor
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_TECH: ${{ secrets.DISCORD_WEBHOOK_URL_TECH }}
           PYTHONPATH: .
-        run: python monitor.py ${{ steps.seed.outputs.flag }}
+        run: python monitor.py
 
       - name: Commit state
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore(state): refresh postings [skip ci]"
-          file_pattern: "state/postings.json firms_detected.json unsupported.log"
+          file_pattern: "state/*.json firms_detected.json unsupported.log"
           commit_user_name: "q27bot"
           commit_user_email: "q27bot@users.noreply.github.com"

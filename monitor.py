@@ -1,18 +1,18 @@
-"""Entry point for the Summer 2027 quant intern monitor.
+"""Entry point for the Summer 2027 intern monitor.
 
 Run order:
-  1. Load firms.yaml + filter rules.
+  1. Load firms.yaml — profiles + sources + firm list.
   2. Fetch SimplifyJobs and Northwestern in parallel (high-recall).
   3. Run ATS detection (cached) for each firm with a careers_url.
   4. Fetch Greenhouse/Lever/Ashby in parallel (max 5 concurrent).
-  5. Filter by title.
-  6. Diff against state/postings.json.
-  7. Notify Discord; commit-back is handled by the workflow.
+  5. For each profile: filter by title, diff against profile state, notify
+     profile webhook, save profile state. A posting matching multiple
+     profiles is sent to all matching channels.
 
 Flags:
-  --dry-run   : hit real APIs, print would-notify, don't post or write state.
-  --seed      : populate state without notifications, send one summary message.
-                Workflow auto-passes this when state file is missing.
+  --dry-run          : hit real APIs, print would-notify, don't post or write state.
+  --seed             : force seed behavior on every profile (single summary, no diff pings).
+  --profile NAME     : only process this profile (default: all profiles in firms.yaml).
 """
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ from sources import ashby, greenhouse, lever, northwestern, simplify
 from sources.base import Posting
 
 ROOT = Path(__file__).resolve().parent
-STATE_PATH = ROOT / "state" / "postings.json"
 UNSUPPORTED_LOG = ROOT / "unsupported.log"
 
 log = logging.getLogger("q27bot")
@@ -45,19 +44,19 @@ log = logging.getLogger("q27bot")
 # ---------- state ----------
 
 
-def load_state() -> dict:
-    if not STATE_PATH.exists() or STATE_PATH.stat().st_size == 0:
+def load_state(path: Path) -> dict:
+    if not path.exists() or path.stat().st_size == 0:
         return {}
     try:
-        return json.loads(STATE_PATH.read_text())
+        return json.loads(path.read_text())
     except json.JSONDecodeError:
-        log.warning("state: corrupt JSON, treating as empty")
+        log.warning("state: %s corrupt, treating as empty", path)
         return {}
 
 
-def save_state(state: dict) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
+def save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
 def diff(current: list[Posting], previous: dict) -> tuple[list[Posting], list[str], dict]:
@@ -68,7 +67,7 @@ def diff(current: list[Posting], previous: dict) -> tuple[list[Posting], list[st
     """
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     current_by_key = {p.key(): p for p in current}
-    new_state = dict(previous)  # shallow copy
+    new_state = dict(previous)
 
     new_postings: list[Posting] = []
     for key, p in current_by_key.items():
@@ -113,13 +112,12 @@ def fetch_community(cfg: dict) -> list[Posting]:
 
 
 def fetch_one_firm(firm: dict, cache: dict) -> tuple[str, list[Posting], Optional[str]]:
-    """Returns (firm_name, postings, error_msg). error_msg is non-None on failure."""
     name = firm["name"]
     careers = firm.get("careers_url")
     override_ats = firm.get("ats")
     override_slug = firm.get("slug")
     if not careers and not (override_ats and override_slug):
-        return name, [], None  # nothing to do — already accounted for in firm list
+        return name, [], None
     try:
         det = detect.detect_with_cache(
             name, careers, cache, override_ats=override_ats, override_slug=override_slug
@@ -174,12 +172,75 @@ def fetch_direct(cfg: dict) -> tuple[list[Posting], list[tuple[str, str]]]:
     return out, failures
 
 
+# ---------- per-profile pipeline ----------
+
+
+def run_profile(
+    profile_name: str,
+    profile_cfg: dict,
+    deduped: dict[str, Posting],
+    failure_count: int,
+    *,
+    dry_run: bool,
+    force_seed: bool,
+) -> tuple[int, int, int]:
+    """Apply one profile's filter+diff+notify. Returns (matched, new, gone)."""
+    rules = FilterRules.from_dict(profile_cfg["filters"])
+    state_path = ROOT / profile_cfg["state_file"]
+    webhook_env = profile_cfg["webhook_env"]
+    webhook = os.environ.get(webhook_env, "")
+
+    matched = [p for p in deduped.values() if title_passes(p.title, rules)]
+    previous = load_state(state_path)
+    is_first_run = not previous
+    new_postings, gone, updated_state = diff(matched, previous)
+
+    log.info(
+        "profile=%s matched=%d new=%d gone=%d (state=%s)",
+        profile_name, len(matched), len(new_postings), len(gone), state_path.name,
+    )
+
+    if not webhook and not dry_run:
+        log.error("profile=%s: %s is unset — skipping notify (state still saved)",
+                  profile_name, webhook_env)
+    else:
+        if force_seed or is_first_run:
+            msg = (
+                f"🎯 q27bot [{profile_name}] initialized — tracking "
+                f"**{len(matched)}** Summer 2027 postings. Future runs will alert on new entries only."
+            )
+            notify.send_text(webhook, msg, dry_run=dry_run)
+        elif new_postings:
+            notify.send_postings(webhook, new_postings, dry_run=dry_run)
+
+        if failure_count > 5:
+            notify.send_text(
+                webhook,
+                f"⚠️ [{profile_name}] {failure_count} firms failed this run.",
+                dry_run=dry_run,
+            )
+
+    if not dry_run:
+        save_state(state_path, updated_state)
+
+    return len(matched), len(new_postings), len(gone)
+
+
 # ---------- main ----------
 
 
-def run(*, dry_run: bool, seed: bool) -> int:
+def run(*, dry_run: bool, seed: bool, only_profile: Optional[str]) -> int:
     cfg = yaml.safe_load((ROOT / "firms.yaml").read_text())
-    rules = FilterRules.from_dict(cfg["filters"])
+    profiles = cfg.get("profiles") or {}
+    if not profiles:
+        log.error("firms.yaml has no `profiles:` block")
+        return 2
+
+    if only_profile:
+        if only_profile not in profiles:
+            log.error("profile %r not in firms.yaml (have: %s)", only_profile, list(profiles))
+            return 2
+        profiles = {only_profile: profiles[only_profile]}
 
     log.info("fetching community sources…")
     community = fetch_community(cfg)
@@ -192,50 +253,26 @@ def run(*, dry_run: bool, seed: bool) -> int:
     raw = community + direct
     deduped: dict[str, Posting] = {}
     for p in raw:
-        # Same firm + external_id may show up via multiple sources; first wins.
         deduped.setdefault(p.key(), p)
+    log.info("deduped pool: %d postings", len(deduped))
 
-    matched = [p for p in deduped.values() if title_passes(p.title, rules)]
-    log.info("matched: %d/%d after filter", len(matched), len(deduped))
-
-    previous = load_state()
-    is_first_run = not previous
-
-    new_postings, gone, updated_state = diff(matched, previous)
-    log.info("diff: new=%d gone=%d", len(new_postings), len(gone))
-
-    webhook = os.environ.get("DISCORD_WEBHOOK_URL", "")
-    if not webhook and not dry_run:
-        log.error("DISCORD_WEBHOOK_URL is unset — set the secret or use --dry-run")
-        return 2
-
-    if seed or is_first_run:
-        msg = (
-            f"🎯 q27bot initialized — tracking **{len(matched)}** Summer 2027 "
-            f"quant intern postings. Future runs will alert on new entries only."
+    summary: list[str] = []
+    for name, pcfg in profiles.items():
+        m, n, g = run_profile(
+            name, pcfg, deduped, len(failures),
+            dry_run=dry_run, force_seed=seed,
         )
-        notify.send_text(webhook, msg, dry_run=dry_run)
-    else:
-        if new_postings:
-            notify.send_postings(webhook, new_postings, dry_run=dry_run)
+        summary.append(f"{name}: matched={m} new={n} gone={g}")
 
-    if len(failures) > 5:
-        msg = f"⚠️ {len(failures)} firms failed this run: " + ", ".join(
-            f"{n} ({e[:40]})" for n, e in failures[:8]
-        )
-        notify.send_text(webhook, msg, dry_run=dry_run)
-
-    if not dry_run:
-        save_state(updated_state)
-
-    print(f"summary: matched={len(matched)} new={len(new_postings)} gone={len(gone)} failures={len(failures)}")
+    print(f"summary: " + " | ".join(summary) + f" | failures={len(failures)}")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Summer 2027 quant intern monitor")
+    parser = argparse.ArgumentParser(description="Summer 2027 intern monitor (multi-profile)")
     parser.add_argument("--dry-run", action="store_true", help="don't post or write state")
-    parser.add_argument("--seed", action="store_true", help="seed state, send single summary")
+    parser.add_argument("--seed", action="store_true", help="force seed behavior on all profiles")
+    parser.add_argument("--profile", help="only run this profile (default: all)")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -244,7 +281,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     t0 = time.time()
-    rc = run(dry_run=args.dry_run, seed=args.seed)
+    rc = run(dry_run=args.dry_run, seed=args.seed, only_profile=args.profile)
     log.info("done in %.1fs", time.time() - t0)
     return rc
 
